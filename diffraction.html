@@ -15,8 +15,10 @@
         <td class="label-value" id="z"></td>
       </tr>
       <tr>
-        <td class="label-name">Slit width (mm)</td>
-        <td class="label-value" id="slit_width" data-decimal="3"></td>
+        <td class="label-name">Slit size (mm)</td>
+        <td class="label-value">
+          <span id="slit_width" data-decimal="3"></span>×<span id="slit_height" data-decimal="3"></span>
+        </td>
       </tr>
       <tr>
         <td class="label-name">Array size</td>
@@ -215,6 +217,7 @@
     meta.z = 500.0; // mm
     meta.pixel_size = 0.018; // mm
     meta.slit_width = 0.02; // mm
+    meta.slit_height = meta.slit_width;
     meta.slit_delta = meta.slit_width/(2 * N);
     meta.pitch = 0.3; // mm
     meta.array_width = 2*M + 1;
