@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Diffraction Simulation</title>
+  <script type="text/javascript">
+    function getWebglContext(canvas, meta) {
+      const X_MID = (canvas.width / 2).toFixed(1);
+      const Y_MID = (canvas.height / 2).toFixed(1);
+
+      const gl = canvas.getContext("webgl");
+
+      if (!gl.getExtension('OES_texture_float')) {
+        alert("OES_texture_float is not supported");
+        return;
+      }
+
+      const vsSource = `
+        attribute vec4 position;
+        void main(void) {
+          gl_Position = position;
+        }`;
+
+      const fsSource = `
+        precision highp float;
+
+        uniform float k;
+        uniform float z;
+        uniform float pixel_size;
+        uniform float slit_delta;
+        uniform float pitch;
+        uniform float slit_phases[${meta.MM * meta.MM}];
+
+        vec2 rotate(vec2 v, float theta) {
+          float cos_theta = cos(theta);
+          float sin_theta = sin(theta);
+          return vec2(v.x*cos_theta - v.y*sin_theta,
+                      v.x*sin_theta + v.y*cos_theta);
+        }
+
+        float mag(vec2 v) {
+          return v.x*v.x + v.y*v.y;
+        }
+
+        vec2 slit(vec2 p_img, vec2 p_slit, float slit_phase) {
+          // 2d vector from centre of the slit to position in the image.
+          vec2 p_d_img = p_img - p_slit;
+          float mag_p_d_img = mag(p_d_img);
+          float k_over_z = k / z;
+          vec2 e = vec2(0.0, 0.0);
+          for (int col = -${meta.N}; col <= ${meta.N}; ++col) {
+            // The position on the slit relative to p_slit (the centre of the slit).
+            vec2 p = vec2(float(col) * slit_delta, 0.0);
+            for (int row = -${meta.N}; row <= ${meta.N}; ++row) {
+              p.y = float(row) * slit_delta;
+              float phase = -k_over_z * dot(p, p_d_img);
+              e.x += cos(phase);
+              e.y += sin(phase);
+            }
+          }
+          e /= sqrt(z*z + mag_p_d_img);
+          return rotate(e, slit_phase + k_over_z * mag_p_d_img / 2.0);
+        }
+
+        void main() {
+          // The image point (in the x-y plane at z-coordinate z).
+          vec2 p_img = vec2((gl_FragCoord.x - ${X_MID}) * pixel_size,
+                            (gl_FragCoord.y - ${Y_MID}) * pixel_size);
+          // The electric field at point p_img.
+          vec2 e = vec2(0.0, 0.0);
+          for (int col = 0; col < ${meta.MM}; ++col) {
+            // The center of the slit (in the x-y plane at z-coordinate 0).
+            vec2 p_slit = vec2(float(col - ${meta.M}) * pitch, 0.0);
+            for (int row = 0; row < ${meta.MM}; ++row) {
+              p_slit.y = float(row - ${meta.M}) * pitch;
+              e += slit(p_img, p_slit, slit_phases[col*${meta.MM} + row]);
+            }
+          }
+          gl_FragColor = vec4(mag(e), 0.0, 0.0, 1.0);
+        }
+      `;
+
+      const vertexShader = gl.createShader(gl.VERTEX_SHADER);
+      gl.shaderSource(vertexShader, vsSource);
+      gl.compileShader(vertexShader);
+      if (!gl.getShaderParameter(vertexShader, gl.COMPILE_STATUS)) {
+        console.log('Vertex shader failed to compile: ' + gl.getShaderInfoLog(vertexShader));
+      }
+
+      const fragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
+      gl.shaderSource(fragmentShader, fsSource);
+      gl.compileShader(fragmentShader);
+      if (!gl.getShaderParameter(fragmentShader, gl.COMPILE_STATUS)) {
+        console.log('Fragment shader failed to compile: ' + gl.getShaderInfoLog(fragmentShader));
+      }
+
+      const program = gl.createProgram();
+      gl.attachShader(program, vertexShader);
+      gl.attachShader(program, fragmentShader);
+      gl.linkProgram(program);
+      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        console.log('Program failed to link: ' + gl.getProgramInfoLog(program));
+      }
+      gl.useProgram(program);
+
+      const vertices = new Float32Array([
+        -1, 1,
+        -1, -1,
+        1, -1,
+        1, 1,
+      ]);
+
+      const vertex_buffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, vertex_buffer);
+      gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+
+      const position = gl.getAttribLocation(program, "position");
+      gl.enableVertexAttribArray(position);
+      gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
+
+      const fb = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+
+      const tex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, canvas.width, canvas.height, 0, gl.RGBA, gl.FLOAT, null);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+
+      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+        alert("Framebuffer is not complete");
+        return;
+      }
+
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+
+      // Bind CPU to GPU variables
+      const gpu_k = gl.getUniformLocation(program, "k");
+      const gpu_z = gl.getUniformLocation(program, "z");
+      const gpu_pixel_size = gl.getUniformLocation(program, "pixel_size");
+      const gpu_slit_delta = gl.getUniformLocation(program, "slit_delta");
+      const gpu_pitch = gl.getUniformLocation(program, "pitch");
+      const gpu_slit_phases = gl.getUniformLocation(program, "slit_phases");
+
+      const rawOutput = new Float32Array(canvas.width * canvas.height * 4);
+      const output = new Float32Array(canvas.width * canvas.height);
+
+      const updateMeta = () => {
+        gl.uniform1f(gpu_k, meta.k);
+        gl.uniform1f(gpu_z, meta.z);
+        gl.uniform1f(gpu_pixel_size, meta.pixel_size);
+        gl.uniform1f(gpu_slit_delta, meta.slit_delta);
+        gl.uniform1f(gpu_pitch, meta.pitch);
+        gl.uniform1fv(gpu_slit_phases, meta.slit_phases);
+      };
+
+      ctx = { };
+      ctx.calculate = () => {
+        updateMeta();
+        gl.drawArrays(gl.TRIANGLE_FAN, 0, 4);
+        gl.readPixels(0, 0, canvas.width, canvas.height, gl.RGBA, gl.FLOAT, rawOutput);
+
+        ctx.min = Number.MAX_VALUE;
+        ctx.max = 0;
+        for (let i = 0, j = 0; i < rawOutput.length; i += 4, j++) {
+          output[j] = rawOutput[i];
+          ctx.min = Math.min(ctx.min, output[j]);
+          ctx.max = Math.max(ctx.max, output[j]);
+        }
+      }
+      ctx.output = output;
+
+      return ctx;
+    }
+  </script>
+  <script type="text/javascript">
+    function displayImage(ctx, data, min, max) {
+      const imgDataArray = new Uint8ClampedArray(data.length * 4);
+      for (let i = 0, j = 0; i < data.length; i++, j += 4) {
+        let r = data[i] / max;
+        let g = 0;
+        if (r > 0.5) {
+          g = (r - 0.5);
+          r = 0.5;
+        }
+
+        imgDataArray[j] = r * 510.0;
+        imgDataArray[j + 1] = g * 510.0;
+        imgDataArray[j + 2] = 0;
+        imgDataArray[j + 3] = 255;
+      }
+      const imgData = new ImageData(imgDataArray, ctx.canvas.width, ctx.canvas.height);
+      ctx.putImageData(imgData, 0, 0);
+    }
+  </script>
+  <script>
+    function updateLabels(meta) {
+      for (const key in meta) {
+        const labelElement = document.getElementById(key);
+        if (labelElement) {
+          const decimalPlacesAttr = labelElement.getAttribute('data-decimal');
+          const decimalPlaces = decimalPlacesAttr !== null ? parseInt(decimalPlacesAttr, 10) : 0;
+          labelElement.textContent = meta[key].toFixed(decimalPlaces);
+        }
+      }
+    }
+  </script>
+  <script type="text/javascript">
+    function random_phases(phases) {
+      for (let i in phases) {
+        phases[i] = 2 * Math.PI * Math.random();
+      }
+    }
+
+    function rotate(v, theta) {
+      cos_theta = Math.cos(theta);
+      sin_theta = Math.sin(theta);
+      return [v[0]*cos_theta - v[1]*sin_theta, v[0]*sin_theta + v[1]*cos_theta];
+    }
+
+    function wedge_phases(phases, slit_vectors, meta) {
+      const dp = Math.tan(meta.wedge_angle);
+      const k = meta.k * meta.wedge_n * dp;
+      const r = 2*Math.PI*meta.wedge_rotation;
+      for (let i in phases) {
+        const r_slit = rotate(slit_vectors[i], r);
+        phases[i] = r_slit[1] * k;
+      }
+    }
+
+    function random_k(meta) {
+      const lambda = meta.lambda + meta.bandwidth*(Math.random() - 0.5);
+      meta.k = 2.0 * Math.PI / (lambda * 1E-6);
+    }
+
+    function main() {
+      const calc_canvas = document.getElementById('calc_canvas');
+      const static_ctx = document.getElementById('static_image').getContext('2d');
+      const aminated_ctx = document.getElementById('animated_image').getContext('2d');
+      const averaged_ctx = document.getElementById('averaged_image').getContext('2d');
+
+      const meta = {};
+      meta.N = 10;
+      meta.M = 8;
+      meta.MM = 2*meta.M + 1;
+      meta.lambda = 1500; // nm.
+      meta.bandwidth = 5; // nm.
+      meta.k = 2.0 * Math.PI / (meta.lambda * 1E-6)
+      meta.z = 500.0; // mm
+      meta.pixel_size = 0.018; // mm
+      meta.slit_width = 0.02; // mm
+      meta.slit_height = meta.slit_width;
+      meta.slit_delta = meta.slit_width/(2 * meta.N);
+      meta.pitch = 0.94; // mm
+      meta.array_width = 2*meta.M + 1;
+      meta.array_height = meta.array_width;
+      meta.canvas_width = calc_canvas.width;
+      meta.canvas_height = calc_canvas.height;
+      meta.frames = 0;
+      meta.slit_phases = new Float32Array(meta.MM * meta.MM).fill(0);
+      meta.u2 = 0;
+      meta.wedge_angle = 0.00873; // radians
+      meta.wedge_n = 1.458;
+      meta.wedge_rotation = 0; // /2π
+      meta.wedge_rotation_delta = 1 / 1000;
+
+      const webgl = getWebglContext(calc_canvas, meta);
+      webgl.calculate();
+      displayImage(static_ctx, webgl.output, webgl.min, webgl.max);
+
+      const averaged_output = new Float32Array(webgl.output.length).fill(0);
+      const max_frames = 1000;
+
+      // vectors to the centre of the slit from the central slit
+      // (axis of rotation of the wedge).
+      slit_vectors = new Array(meta.MM * meta.MM).fill([0.0, 0.0]);
+      for (let col = 0; col < meta.MM; ++col) {
+        for (let row = 0; row < meta.MM; ++row) {
+          slit_vectors[col*meta.MM + row] =
+            [(col - meta.M) * meta.pitch, (row - meta.M) * meta.pitch];
+        }
+      }
+
+      animate = () => {
+        requestAnimationFrame((currentTime) => {
+          random_k(meta);
+          //random_phases(meta.slit_phases);
+          wedge_phases(meta.slit_phases, slit_vectors, meta);
+          webgl.calculate();
+          min = Number.MAX_VALUE;
+          max = 0;
+          for (let i in webgl.output) {
+            averaged_output[i] += webgl.output[i];
+            min = Math.min(min, averaged_output[i]);
+            max = Math.max(max, averaged_output[i]);
+          }
+          displayImage(aminated_ctx, webgl.output, webgl.min, webgl.max);
+          if (meta.frames % 10 == 0) {
+            displayImage(averaged_ctx, averaged_output, min, max);
+          }
+          meta.frames ++;
+          meta.u2 = 100*min/max;
+          meta.wedge_rotation += meta.wedge_rotation_delta;
+          updateLabels(meta);
+          if (meta.frames < max_frames) {
+            animate();
+          }
+        });
+      };
+      animate();
+    }
+  </script>
+</head>
+<body onload="main();">
+  <div class="container">
+    <table class="labels">
+      <tr>
+        <td class="label-name">λ (nm)</td>
+        <td class="label-value" id="lambda"></td>
+      </tr>
+      <tr>
+        <td class="label-name">Bandwidth (nm)</td>
+        <td class="label-value" id="bandwidth"></td>
+      </tr>
+      <tr>
+        <td class="label-name">z (mm)</td>
+        <td class="label-value" id="z"></td>
+      </tr>
+      <tr>
+        <td class="label-name">Slit size (mm)</td>
+        <td class="label-value">
+          <span id="slit_width" data-decimal="3"></span>×<span id="slit_height" data-decimal="3"></span>
+        </td>
+      </tr>
+      <tr>
+        <td class="label-name">Array size</td>
+        <td class="label-value">
+          <span id="array_width"></span>×<span id="array_height"></span>
+        </td>
+      </tr>
+      <tr>
+        <td class="label-name">Array pitch (mm)</td>
+        <td class="label-value" id="pitch" data-decimal="3"></td>
+      </tr>
+      <tr>
+        <td class="label-name">Image size (pixels)</td>
+        <td class="label-value">
+          <span id="canvas_width"></span>×<span id="canvas_height"></span>
+        </td>
+      </tr>
+      <tr>
+        <td class="label-name">Pixel size (mm)</td>
+        <td class="label-value" id="pixel_size" data-decimal="3"></td>
+      </tr>
+      <tr>
+        <td class="label-name">Frames</td>
+        <td class="label-value" id="frames"></td>
+      </tr>
+      <tr>
+        <td class="label-name">U2 (%)</td>
+        <td class="label-value" id="u2" data-decimal="2"></td>
+      </tr>
+      <tr>
+        <td class="label-name">Wedge Rotation (/2&pi;)</td>
+        <td class="label-value" id="wedge_rotation" data-decimal="2"></td>
+      </tr>
+    </table>
+    <div class="canvas-wrapper">
+      <canvas id="static_image" width="100" height="100"></canvas>
+      <canvas id="animated_image" width="100" height="100"></canvas>
+      <canvas id="averaged_image" width="100" height="100"></canvas>
+    </div>
+  </div>
+  <canvas id="calc_canvas" width="100" height="100" style="display: none;"></canvas>
+  <style>
+    canvas {
+      zoom: 400%;
+      display: inline-block;
+      margin-right: 5px;
+      margin-bottom: 5px;
+    }
+    .canvas-wrapper {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      justify-items: center;
+    }
+    .container {
+      background-color: #F0F0F0;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      position: relative;
+    }
+
+    .labels {
+      position: absolute;
+      top: 0;
+      left: 0;
+      padding-top: 10px;
+      padding-left: 10px;
+      color: black;
+    }
+    .label-value {
+      padding-left: 10px;
+    }
+  </style>
+</body>
+</html>
