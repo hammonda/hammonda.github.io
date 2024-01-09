@@ -40,13 +40,29 @@
         <td class="label-name">Pixel size (mm)</td>
         <td class="label-value" id="pixel_size" data-decimal="3"></td>
       </tr>
+      <tr>
+        <td class="label-name">Frames</td>
+        <td class="label-value" id="frames"></td>
+      </tr>
+      <tr>
+        <td class="label-name">U2 (%)</td>
+        <td class="label-value" id="u2" data-decimal="2"></td>
+      </tr>
     </table>
-    <canvas id="canvas" width="100" height="100"></canvas>
+    <div class="canvas-wrapper">
+      <canvas id="canvas" width="100" height="100"></canvas>
+      <canvas id="canvas2" width="100" height="100"></canvas>
+    </div>
   </div>
   <style>
     canvas {
-      zoom: 500%;
-      display: block;
+      zoom: 400%;
+      display: inline-block;
+      margin-right: 10px;
+    }
+    .canvas-wrapper {
+      display: inline-flex;
+      justify-content: center;
     }
     .container {
       background-color: black;
@@ -56,6 +72,7 @@
       height: 100vh;
       position: relative;
     }
+
     .labels {
       position: absolute;
       top: 0;
@@ -81,9 +98,53 @@
     }
   </script>
   <script>
+  let storedPixels = [];  // Array to store pixel data
+  function updateCanvas2FromCanvas1(gl, ctx2) {
+    // Get dimensions from the WebGL canvas
+    const canvas1 = gl.canvas;
+    const width = canvas1.width;
+    const height = canvas1.height;
+
+    // Create a buffer to read pixel data
+    const pixels = new Uint8Array(width * height * 4);
+    
+    // Read pixels from WebGL canvas
+    gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+    
+    // Add read pixels to the storedPixels array and update maxPixelValue
+    let maxPixelValue = 0;
+    let minPixelValue = Number.MAX_VALUE;
+    for (let i in pixels) {
+      storedPixels[i] = (storedPixels[i] || 0) + pixels[i];
+      maxPixelValue = Math.max(maxPixelValue, storedPixels[i]);
+      minPixelValue = Math.min(minPixelValue, storedPixels[i]);
+    }
+
+    // Create a normalized pixel array
+    const normalizedPixels = new Uint8ClampedArray(pixels.length);
+    for (let i in storedPixels) {
+      normalizedPixels[i] = (storedPixels[i] / maxPixelValue) * 255;
+    }
+    
+    // Create new ImageData and update canvas2
+    const imgData = new ImageData(normalizedPixels, width, height);
+    ctx2.putImageData(imgData, 0, 0);
+    return 100.0 * minPixelValue / maxPixelValue;
+  }
+  </script>
+  <script>
     // Get canvas and WebGL context
     const canvas = document.getElementById("canvas");
     const gl = canvas.getContext("webgl");
+
+    // Enable float textures
+//    const ext = gl.getExtension("OES_texture_float");
+//    if (!ext) {
+//      console.log("OES_texture_float is not available");
+//    }
+
+    const canvas2 = document.getElementById("canvas2");
+    const ctx2 = canvas2.getContext("2d");
 
     // Shader source code
     const vertexShaderSrc = `
@@ -93,8 +154,9 @@
       }
     `;
 
-    const N = 10;
+    const N = 20;
     const M = 8;
+    const MM = 2*M + 1;
     const X_MID = (canvas.width / 2).toFixed(1);
     const Y_MID = (canvas.height / 2).toFixed(1);
 
@@ -106,6 +168,7 @@
       uniform float pixel_size; 
       uniform float slit_delta;
       uniform float pitch;
+      uniform float random_phase[${MM*MM}];
 
       vec2 rotate(vec2 v, float theta) {
         float cos_theta = cos(theta);
@@ -118,7 +181,7 @@
         return v.x*v.x + v.y*v.y;
       }
 
-      vec2 slit(vec2 p_img, vec2 p_slit) {
+      vec2 slit(vec2 p_img, vec2 p_slit, float r_phase) {
         // 2d vector from centre of the slit to position in the image.
         vec2 p_d_img = p_img - p_slit;
         float mag_p_d_img = mag(p_d_img);
@@ -136,7 +199,7 @@
           }
         }
         e /= sqrt(z*z + mag_p_d_img);
-        return rotate(e, k_over_z * mag_p_d_img / 2.0);
+        return rotate(e, r_phase + k_over_z * mag_p_d_img / 2.0);
       }
 
       void main() {
@@ -146,17 +209,18 @@
 
         // The electric field at point p_img.
         vec2 e = vec2(0.0, 0.0);
-        for (int col = -${M}; col <= ${M}; ++col) {
+        for (int col = 0; col <= ${MM}; ++col) {
           // The center of the slit (in the x-y plane at z-coordinate 0).
-          vec2 p_slit = vec2(float(col) * pitch, 0.0);
-          for (int row = -${M}; row <= ${M}; ++row) {
-            p_slit.y = float(row) * pitch;
-            e += slit(p_img, p_slit);
+          vec2 p_slit = vec2(float(col - ${M}) * pitch, 0.0);
+          for (int row = 0; row <= ${MM}; ++row) {
+            p_slit.y = float(row - ${M}) * pitch;
+            e += slit(p_img, p_slit, random_phase[col*${MM} + row]);
           }
         }
 
-        float e_m = 0.005 * mag(e);
-        float over = e_m > 1.0 ? 0.075 * (e_m - 1.0) : 0.0;
+        float e_m = mag(e);
+        e_m *= 0.0005;
+        float over = e_m > 1.0 ? 0.05 * (e_m - 1.0) : 0.0;
         gl_FragColor = vec4(e_m, over, 0.0, 1.0);
       }
     `;
@@ -211,6 +275,9 @@
     const gpu_pixel_size = gl.getUniformLocation(program, "pixel_size");
     const gpu_slit_delta = gl.getUniformLocation(program, "slit_delta");
     const gpu_pitch = gl.getUniformLocation(program, "pitch");
+    const gpu_random_phase = gl.getUniformLocation(program, "random_phase");
+
+    const random_phase = new Float32Array(MM*MM);
 
     const meta = {};
     meta.lambda = 1500.0; // nm.
@@ -219,14 +286,15 @@
     meta.slit_width = 0.02; // mm
     meta.slit_height = meta.slit_width;
     meta.slit_delta = meta.slit_width/(2 * N);
-    meta.pitch = 0.3; // mm
+    meta.pitch = 0.94; // mm
     meta.array_width = 2*M + 1;
     meta.array_height = meta.array_width;
     meta.canvas_width = canvas.width;
     meta.canvas_height = canvas.height;
+    meta.frames = 0;
+    meta.u2 = 0;
 
-    let frames = 0;
-    const num_frames = 10000;
+    const num_frames = 5;
 
     animate = () => {
       requestAnimationFrame((currentTime) => {
@@ -235,11 +303,16 @@
         gl.uniform1f(gpu_pixel_size, meta.pixel_size);
         gl.uniform1f(gpu_slit_delta, meta.slit_delta);
         gl.uniform1f(gpu_pitch, meta.pitch);
-        updateLabels(meta);
+        for (let i in random_phase) {
+          random_phase[i] = 2 * Math.PI * Math.random();
+        }
+        gl.uniform1fv(gpu_random_phase, new Float32Array(random_phase));
         gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-        frames++;
-        if (frames < num_frames) {
-          meta.pitch = 0.3 + frames*0.0002;
+        //meta.u2 = updateCanvas2FromCanvas1(gl, ctx2);
+        meta.frames++;
+        updateLabels(meta);
+        if (meta.frames < num_frames) {
+          //meta.pitch = 0.94 + frames*0.0002;
           animate();
         }
       });
